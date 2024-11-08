@@ -873,7 +873,7 @@ class Permissions(interactions.Extension):
                         option=orjson.OPT_INDENT_2 | orjson.OPT_NON_STR_KEYS,
                     ).decode()
                 ),
-                file_name=f"{guild.name}_permissions_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.json",
+                file_name=f"{guild.name}_permissions_{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}.json",
             ),
         )
 
@@ -935,12 +935,12 @@ class Permissions(interactions.Extension):
                 affected = risk.affected_permissions
 
                 if admin_perm in affected:
-                    await role.edit(permissions=current_perms & ~admin_perm)
+                    await role.edit(permissions=str(current_perms & ~admin_perm))
                     results.append(
                         f"Removed administrator permission from role {role_name}"
                     )
                 elif guild_perm in affected:
-                    await role.edit(permissions=current_perms & ~dangerous_mask)
+                    await role.edit(permissions=str(current_perms & ~dangerous_mask))
                     results.append(
                         f"Removed dangerous permission combination from role {role_name}"
                     )
