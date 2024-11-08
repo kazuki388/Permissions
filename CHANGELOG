@@ -8,6 +8,12 @@
 - Logging system with rotating file handler
 - Paginated audit results
 - MFA requirement checks
+- Permission templates and rollback functionality
+- Temporary permission system with auto-expiry
+- Periodic permission auditing
+- Permission risk detection and analysis
+- Permission export command
+- New permission checks for forums and categories
 
 ### Changed
 - Removed template code; implemented functionality
