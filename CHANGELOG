@@ -1,19 +1,33 @@
+## 2024-11-09
+
+### Added
+- Standardized method naming conventions (e.g., `check_*` for audit methods).
+- Simplified permission template initialization using dictionary comprehension.
+- Optimized filtering using the `filter()` function instead of list comprehensions.
+
+### Changed
+- Converted instance variables to `snake_case`.
+- Renamed parameters for clarity (e.g., `log_to_channel` -> `should_log`).
+
+### Fixed
+- Corrected permissions to use string values.
+
 ## 2024-11-08
 
 ### Added
-- Permission risk assessment and monitoring
-- Role hierarchy analysis
-- Channel permission overwrites analysis
-- Automated permission fixes
-- Logging system with rotating file handler
-- Paginated audit results
-- MFA requirement checks
-- Permission templates and rollback functionality
-- Temporary permission system with auto-expiry
-- Periodic permission auditing
-- Permission risk detection and analysis
-- Permission export command
-- New permission checks for forums and categories
+- Permission risk assessment and monitoring features.
+- Role hierarchy analysis tools.
+- Channel permission overwrites analysis.
+- Automated permission fixes functionality.
+- Logging system with a rotating file handler.
+- Paginated audit results for better readability.
+- MFA requirement checks.
+- Permission templates and rollback functionality.
+- Temporary permission system with auto-expiry feature.
+- Periodic permission auditing capabilities.
+- Permission risk detection and analysis tools.
+- Permission export command for easier management.
+- New permission checks for forums and categories.
 
 ### Changed
-- Removed template code; implemented functionality
+- Removed template code and implemented full functionality.
