@@ -176,69 +176,61 @@ class Permissions(interactions.Extension):
         self.role_hierarchy: dict[int, RoleLevel] = {}
         self.channel_overwrites: dict[int, dict[int, interactions.Overwrite]] = {}
         self.guild: Optional[interactions.Guild] = None
-        self.LOG_CHANNEL_ID: int = 1166627731916734504
-        self.LOG_FORUM_ID: int = 1159097493875871784
-        self.LOG_POST_ID: int = 1279118293936111707
-        self.GUILD_ID: int = 1150630510696075404
+        self.log_channel_id: int = 1166627731916734504
+        self.log_forum_id: int = 1159097493875871784
+        self.log_post_id: int = 1279118293936111707
+        self.guild_id: int = 1150630510696075404
 
         self.permission_templates = {
-            "moderator": PermissionTemplate(
-                "moderator",
-                "Basic moderation permissions",
-                sum(
-                    p.value
-                    for p in (
+            k: PermissionTemplate(k, d, sum(p.value for p in perms))
+            for k, d, perms in (
+                (
+                    "basic",
+                    "Basic member permissions",
+                    (
+                        interactions.Permissions.VIEW_CHANNEL,
+                        interactions.Permissions.SEND_MESSAGES,
+                        interactions.Permissions.READ_MESSAGE_HISTORY,
+                        interactions.Permissions.CONNECT,
+                        interactions.Permissions.SPEAK,
+                    ),
+                ),
+                (
+                    "moderator",
+                    "Essential moderation permissions",
+                    (
                         interactions.Permissions.KICK_MEMBERS,
                         interactions.Permissions.BAN_MEMBERS,
                         interactions.Permissions.MANAGE_MESSAGES,
-                    )
+                        interactions.Permissions.MUTE_MEMBERS,
+                        interactions.Permissions.MOVE_MEMBERS,
+                    ),
                 ),
-            ),
-            "admin": PermissionTemplate(
-                "admin",
-                "Administrative permissions (no ADMINISTRATOR)",
-                sum(
-                    p.value
-                    for p in (
-                        interactions.Permissions.MANAGE_GUILD,
+                (
+                    "admin_lite",
+                    "Limited administrative permissions",
+                    (
                         interactions.Permissions.MANAGE_CHANNELS,
-                        interactions.Permissions.MANAGE_ROLES,
-                    )
-                ),
-            ),
-        }
-
-        self.permission_templates |= {
-            "admin_lite": PermissionTemplate(
-                "admin_lite",
-                "Administrative permissions without critical ones",
-                sum(
-                    p.value
-                    for p in (
-                        interactions.Permissions.MANAGE_MESSAGES,
                         interactions.Permissions.MANAGE_THREADS,
-                        interactions.Permissions.MANAGE_CHANNELS,
-                        interactions.Permissions.MENTION_EVERYONE,
-                    )
+                        interactions.Permissions.MANAGE_MESSAGES,
+                        interactions.Permissions.MANAGE_NICKNAMES,
+                        interactions.Permissions.VIEW_AUDIT_LOG,
+                    ),
                 ),
-            ),
-            "channel_mod": PermissionTemplate(
-                "channel_mod",
-                "Channel moderation permissions",
-                sum(
-                    p.value
-                    for p in (
+                (
+                    "channel_mod",
+                    "Channel moderation permissions",
+                    (
                         interactions.Permissions.MANAGE_MESSAGES,
                         interactions.Permissions.MANAGE_THREADS,
                         interactions.Permissions.VIEW_CHANNEL,
                         interactions.Permissions.SEND_MESSAGES,
-                    )
+                    ),
                 ),
-            ),
+            )
         }
         self.permission_history: defaultdict[Any, list] = defaultdict(list)
         self.temp_permissions: dict[Any, Any] = {}
-        self.permission_stats: defaultdict[Any, int] = defaultdict(int)
 
     DANGEROUS_COMBINATIONS = {
         frozenset({interactions.Permissions.ADMINISTRATOR.value}): PermissionRisk(
@@ -282,25 +274,24 @@ class Permissions(interactions.Extension):
 
     # Checks
 
-    async def check_forum_permissions(self) -> List[PermissionRisk]:
+    async def check_forum_settings(self) -> List[PermissionRisk]:
         return (
             []
             if not self.guild
             else [
                 PermissionRisk(
                     RiskLevel.LOW,
-                    f"Forum channel {channel.name} allows everyone to create threads",
+                    f"Forum channel {c.name} allows everyone to create threads",
                     "Consider restricting thread creation to specific roles",
                     frozenset({interactions.Permissions.CREATE_PUBLIC_THREADS.value}),
                 )
-                for channel in (
-                    c
-                    for c in self.guild.channels
-                    if c.type == interactions.ChannelType.FORUM
+                for c in filter(
+                    lambda ch: ch.type == interactions.ChannelType.FORUM,
+                    self.guild.channels,
                 )
                 if any(
                     o.allow & interactions.Permissions.CREATE_PUBLIC_THREADS.value
-                    for o in channel.permission_overwrites
+                    for o in c.permission_overwrites
                     if o.id == self.guild.id
                 )
             ]
@@ -317,19 +308,18 @@ class Permissions(interactions.Extension):
                     "Consider using category permissions for consistency",
                     frozenset({cat_overwrite.allow, chan_overwrite.allow}),
                 )
-                for category in (
-                    c
-                    for c in self.guild.channels
-                    if isinstance(c, interactions.GuildCategory)
+                for category in filter(
+                    lambda c: isinstance(c, interactions.GuildCategory),
+                    self.guild.channels,
                 )
                 for channel in category.channels
-                for role_id, cat_overwrite in {
-                    o.id: o for o in category.permission_overwrites
-                }.items()
+                for role_id, cat_overwrite in dict(
+                    (o.id, o) for o in category.permission_overwrites
+                ).items()
                 if (
-                    chan_overwrite := {
-                        o.id: o for o in channel.permission_overwrites
-                    }.get(role_id)
+                    chan_overwrite := dict(
+                        (o.id, o) for o in channel.permission_overwrites
+                    ).get(role_id)
                 )
                 and (
                     cat_overwrite.allow != chan_overwrite.allow
@@ -338,62 +328,133 @@ class Permissions(interactions.Extension):
             ]
         )
 
-    async def validate_role_hierarchy(self) -> List[PermissionRisk]:
+    async def check_role_hierarchy(self) -> List[PermissionRisk]:
+        if not self.guild:
+            return []
+        roles = sorted(self.guild.roles, key=lambda r: r.position, reverse=True)
+        admin_roles = [r for r in roles if r.permissions.administrator]
+        return [
+            *(
+                [
+                    PermissionRisk(
+                        RiskLevel.HIGH,
+                        "Administrator roles should be at the top of the hierarchy",
+                        "Move administrator roles above all non-administrator roles",
+                        frozenset({interactions.Permissions.ADMINISTRATOR.value}),
+                    )
+                ]
+                if admin_roles
+                and any(
+                    r
+                    for r in roles
+                    if r.position > admin_roles[0].position
+                    and not r.permissions.administrator
+                )
+                else []
+            ),
+            *(
+                PermissionRisk(
+                    RiskLevel.LOW,
+                    f"Role {lower_role.name} has redundant permissions from {role.name}",
+                    "Consider removing redundant permissions from lower roles",
+                    frozenset({role.permissions.value & lower_role.permissions.value}),
+                )
+                for i, role in enumerate(roles)
+                for lower_role in roles[i + 1 :]
+                if (role.permissions.value & lower_role.permissions.value)
+                == role.permissions.value
+            ),
+        ]
+
+    async def check_category_sync(self) -> List[PermissionRisk]:
         return (
             []
             if not self.guild
             else [
                 PermissionRisk(
-                    RiskLevel.HIGH,
-                    f"Role `{role.name}` with administrator permission has non-admin roles above it",
-                    "Move administrator roles to the top of the hierarchy",
-                    frozenset({interactions.Permissions.ADMINISTRATOR.value}),
+                    RiskLevel.LOW,
+                    f"Channel {channel.name} permissions not synced with category {category.name}",
+                    "Consider syncing permissions with category for easier management",
+                    frozenset(),
                 )
-                for role in (r for r in self.guild.roles if r.permissions.administrator)
-                if any(
-                    not r.permissions.administrator
-                    for r in self.guild.roles
-                    if r.position > role.position
+                for category in filter(
+                    lambda c: isinstance(c, interactions.GuildCategory),
+                    self.guild.channels,
                 )
+                for channel in category.channels
+                if not channel.permission_synced
             ]
         )
 
-    async def check_dangerous_role_combinations(self) -> List[PermissionRisk]:
+    async def check_channel_optimizations(self) -> List[PermissionRisk]:
         if not self.guild:
             return []
-
-        dangerous_risks = [
-            PermissionRisk(
-                risk.level,
-                f"Role `{role.name}` - {risk.description}",
-                risk.mitigation,
-                risk.affected_permissions,
-            )
-            for role in self.guild.roles
-            for dangerous_combo, risk in self.DANGEROUS_COMBINATIONS.items()
-            if all(perm & role.permissions.value == perm for perm in dangerous_combo)
+        return [
+            *(
+                PermissionRisk(
+                    RiskLevel.LOW,
+                    f"Announcement channel {channel.name} allows regular messages",
+                    "Consider restricting to SEND_MESSAGES to specific roles only",
+                    frozenset({interactions.Permissions.SEND_MESSAGES.value}),
+                )
+                for channel in filter(
+                    lambda c: c.type == interactions.ChannelType.ANNOUNCEMENT,
+                    self.guild.channels,
+                )
+                if any(
+                    o.allow & interactions.Permissions.SEND_MESSAGES.value
+                    for o in channel.permission_overwrites
+                )
+            ),
+            *(
+                PermissionRisk(
+                    RiskLevel.INFO,
+                    f"Channel {channel.name} has no permission overwrites",
+                    "Consider setting explicit permissions for better access control",
+                    frozenset(),
+                )
+                for channel in filter(
+                    lambda c: not c.permission_overwrites, self.guild.channels
+                )
+            ),
         ]
 
-        mfa_risks = [
-            PermissionRisk(
-                RiskLevel.HIGH,
-                f"Role `{role.name}` includes permissions that require two-factor authentication.",
-                f"Enable two-factor authentication for users with the following permissions: {', '.join(name for perm in mfa_perms if (mfa_perms := {p for p in self.MFA_REQUIRED_PERMISSIONS if role.permissions.value & p == p}) for name in permission_value_to_names(perm))}",
-                frozenset(mfa_perms),
-            )
-            for role in self.guild.roles
-            if (
-                mfa_perms := {
-                    p
-                    for p in self.MFA_REQUIRED_PERMISSIONS
-                    if role.permissions.value & p == p
-                }
-            )
+    async def check_dangerous_permissions(self) -> List[PermissionRisk]:
+        if not self.guild:
+            return []
+        return [
+            *(
+                PermissionRisk(
+                    risk.level,
+                    f"Role `{role.name}` - {risk.description}",
+                    risk.mitigation,
+                    risk.affected_permissions,
+                )
+                for role in self.guild.roles
+                for dangerous_combo, risk in self.DANGEROUS_COMBINATIONS.items()
+                if all(
+                    perm & role.permissions.value == perm for perm in dangerous_combo
+                )
+            ),
+            *(
+                PermissionRisk(
+                    RiskLevel.HIGH,
+                    f"Role `{role.name}` includes permissions that require two-factor authentication.",
+                    f"Enable two-factor authentication for users with the following permissions: {', '.join(name for perm in mfa_perms if (mfa_perms := {p for p in self.MFA_REQUIRED_PERMISSIONS if role.permissions.value & p == p}) for name in permission_value_to_names(perm))}",
+                    frozenset(mfa_perms),
+                )
+                for role in self.guild.roles
+                if (
+                    mfa_perms := {
+                        p
+                        for p in self.MFA_REQUIRED_PERMISSIONS
+                        if role.permissions.value & p == p
+                    }
+                )
+            ),
         ]
 
-        return dangerous_risks + mfa_risks
-
-    async def analyze_role_hierarchy(self) -> None:
+    async def update_role_hierarchy(self) -> None:
         if self.guild:
             self.role_hierarchy = {
                 pos: RoleLevel(
@@ -402,90 +463,83 @@ class Permissions(interactions.Extension):
                 for pos in {r.position for r in self.guild.roles}
             }
 
-    async def analyze_channel_overwrites(self) -> List[PermissionRisk]:
+    async def check_channel_overwrites(self) -> List[PermissionRisk]:
         if not self.guild:
             return []
-
         channels = tuple(
-            c for c in self.guild.channels if hasattr(c, "permission_overwrites")
+            filter(lambda c: hasattr(c, "permission_overwrites"), self.guild.channels)
         )
         self.channel_overwrites.update(
             {c.id: {o.id: o for o in c.permission_overwrites} for c in channels}
         )
-
-        admin_risks = [
-            PermissionRisk(
-                RiskLevel.CRITICAL,
-                f"Channel `{c.name}` has <&1150630510696075404> admin permissions",
-                "Remove administrator permission from <&1150630510696075404>",
-                frozenset({interactions.Permissions.ADMINISTRATOR.value}),
-            )
-            for c in channels
-            if (o := self.channel_overwrites[c.id].get(self.guild.id))
-            and interactions.Permissions.ADMINISTRATOR.value & o.allow
+        return [
+            *(
+                PermissionRisk(
+                    RiskLevel.CRITICAL,
+                    f"Channel `{c.name}` has <&1150630510696075404> admin permissions",
+                    "Remove administrator permission from <&1150630510696075404>",
+                    frozenset({interactions.Permissions.ADMINISTRATOR.value}),
+                )
+                for c in channels
+                if (o := self.channel_overwrites[c.id].get(self.guild.id))
+                and interactions.Permissions.ADMINISTRATOR.value & o.allow
+            ),
+            *(
+                PermissionRisk(
+                    RiskLevel.LOW,
+                    f"Channel `{c.name}` has redundant overwrites",
+                    f"Remove redundant permissions: {', '.join(permission_value_to_names(overlap))}",
+                    frozenset({overlap}),
+                )
+                for c in channels
+                for o in c.permission_overwrites
+                if (r := self.guild.get_role(o.id))
+                and (overlap := r.permissions.value & o.allow)
+            ),
         ]
-
-        redundant_risks = [
-            PermissionRisk(
-                RiskLevel.LOW,
-                f"Channel `{c.name}` has redundant overwrites",
-                f"Remove redundant permissions: {', '.join(permission_value_to_names(overlap))}",
-                frozenset({overlap}),
-            )
-            for c in channels
-            for o in c.permission_overwrites
-            if (r := self.guild.get_role(o.id))
-            and (overlap := r.permissions.value & o.allow)
-        ]
-
-        return admin_risks + redundant_risks
 
     @property
     @lru_cache(maxsize=128)
-    def dangerous_permission_masks(self) -> dict[int, PermissionRisk]:
+    def dangerous_permission_combinations(self) -> dict[int, PermissionRisk]:
         return {p: r for perms, r in self.DANGEROUS_COMBINATIONS.items() for p in perms}
 
-    async def check_special_channel_permissions(self) -> List[PermissionRisk]:
+    async def check_special_channels(self) -> List[PermissionRisk]:
         if not self.guild:
             return []
-
-        announcement_risks = [
-            PermissionRisk(
-                RiskLevel.LOW,
-                f"Announcement channel {channel.name} allows regular messages",
-                "Consider restricting to announcements only",
-                frozenset({interactions.Permissions.SEND_MESSAGES.value}),
-            )
-            for channel in (
-                c
-                for c in self.guild.channels
-                if c.type == interactions.ChannelType.ANNOUNCEMENT.value
-            )
-            if any(
-                o.allow & interactions.Permissions.SEND_MESSAGES.value
-                for o in channel.permission_overwrites
-            )
+        return [
+            *(
+                PermissionRisk(
+                    RiskLevel.LOW,
+                    f"Announcement channel {channel.name} allows regular messages",
+                    "Consider restricting to announcements only",
+                    frozenset({interactions.Permissions.SEND_MESSAGES.value}),
+                )
+                for channel in filter(
+                    lambda c: c.type == interactions.ChannelType.ANNOUNCEMENT.value,
+                    self.guild.channels,
+                )
+                if any(
+                    o.allow & interactions.Permissions.SEND_MESSAGES.value
+                    for o in channel.permission_overwrites
+                )
+            ),
+            *(
+                PermissionRisk(
+                    RiskLevel.LOW,
+                    f"Forum channel {channel.name} allows regular messages",
+                    "Consider restricting to forum posts only",
+                    frozenset({interactions.Permissions.SEND_MESSAGES.value}),
+                )
+                for channel in filter(
+                    lambda c: c.type == interactions.ChannelType.FORUM.value,
+                    self.guild.channels,
+                )
+                if any(
+                    o.allow & interactions.Permissions.SEND_MESSAGES.value
+                    for o in channel.permission_overwrites
+                )
+            ),
         ]
-
-        forum_risks = [
-            PermissionRisk(
-                RiskLevel.LOW,
-                f"Forum channel {channel.name} allows regular messages",
-                "Consider restricting to forum posts only",
-                frozenset({interactions.Permissions.SEND_MESSAGES.value}),
-            )
-            for channel in (
-                c
-                for c in self.guild.channels
-                if c.type == interactions.ChannelType.FORUM.value
-            )
-            if any(
-                o.allow & interactions.Permissions.SEND_MESSAGES.value
-                for o in channel.permission_overwrites
-            )
-        ]
-
-        return announcement_risks + forum_risks
 
     async def check_permission_inheritance(self) -> List[PermissionRisk]:
         return (
@@ -498,10 +552,9 @@ class Permissions(interactions.Extension):
                     "Remove redundant permission overwrites from child channel",
                     frozenset({cat_overwrite.allow}),
                 )
-                for channel in (
-                    c
-                    for c in self.guild.channels
-                    if isinstance(c, interactions.GuildCategory)
+                for channel in filter(
+                    lambda c: isinstance(c, interactions.GuildCategory),
+                    self.guild.channels,
                 )
                 for child in channel.channels
                 for overwrite_id, cat_overwrite in self.channel_overwrites.get(
@@ -529,7 +582,7 @@ class Permissions(interactions.Extension):
 
     @lru_cache(maxsize=1)
     def _get_log_channels(self) -> tuple[int, int, int]:
-        return self.LOG_CHANNEL_ID, self.LOG_POST_ID, self.LOG_FORUM_ID
+        return self.log_channel_id, self.log_post_id, self.log_forum_id
 
     async def send_response(
         self,
@@ -543,17 +596,19 @@ class Permissions(interactions.Extension):
         title: str,
         message: str,
         color: EmbedColor,
-        log_to_channel: bool = True,
+        should_log: bool = True,
     ) -> None:
         embed = await self.create_embed(title, message, color)
         if ctx:
             await ctx.send(embed=embed, ephemeral=True)
-        if log_to_channel:
+        if should_log:
             log_ch, log_post, log_forum = self._get_log_channels()
-            await self.send_to_channel(log_ch, embed)
+            await self.send_to_text_channel(log_ch, embed)
             await self.send_to_forum_post(log_forum, log_post, embed)
 
-    async def send_to_channel(self, channel_id: int, embed: interactions.Embed) -> None:
+    async def send_to_text_channel(
+        self, channel_id: int, embed: interactions.Embed
+    ) -> None:
         try:
             if not isinstance(
                 channel := await self.bot.fetch_channel(channel_id),
@@ -595,11 +650,9 @@ class Permissions(interactions.Extension):
             ]
         ],
         message: str,
-        log_to_channel: bool = False,
+        should_log: bool = False,
     ) -> None:
-        await self.send_response(
-            ctx, "Error", message, EmbedColor.ERROR, log_to_channel
-        )
+        await self.send_response(ctx, "Error", message, EmbedColor.ERROR, should_log)
 
     async def send_success(
         self,
@@ -611,11 +664,9 @@ class Permissions(interactions.Extension):
             ]
         ],
         message: str,
-        log_to_channel: bool = True,
+        should_log: bool = True,
     ) -> None:
-        await self.send_response(
-            ctx, "Success", message, EmbedColor.INFO, log_to_channel
-        )
+        await self.send_response(ctx, "Success", message, EmbedColor.INFO, should_log)
 
     # Commands
 
@@ -662,7 +713,7 @@ class Permissions(interactions.Extension):
                 ctx, "You need Administrator permission to use this command"
             )
             return
-        await self.apply_template(ctx, role, template, duration)
+        await self.apply_permission_template(ctx, role, template, duration)
 
     @module_base.subcommand(
         "rollback", sub_cmd_description="Rollback permission changes"
@@ -689,25 +740,30 @@ class Permissions(interactions.Extension):
                 ctx, "You need Administrator permission to use this command"
             )
             return
-        await self.rollback_changes(ctx, role, steps)
+        await self.rollback_permission_changes(ctx, role, steps)
 
     @module_base.subcommand("audit", sub_cmd_description="Audit server permissions")
     @interactions.slash_option(
-        name="field",
-        description="The field to audit",
+        name="scope",
+        description="Audit scope",
         required=True,
         opt_type=interactions.OptionType.STRING,
         choices=[
             interactions.SlashCommandChoice(name=n, value=v)
             for n, v in (
-                ("Dangerous Combinations", "dangerous"),
-                ("Channel Overwrites", "overwrites"),
-                ("Permission Inheritance", "inheritance"),
+                ("All", "all"),
+                ("Hierarchy", "hierarchy"),
+                ("Channels", "channels"),
+                ("Overwrites", "overwrites"),
+                ("Inheritance", "inheritance"),
+                ("Dangerous", "dangerous"),
+                ("Special", "special"),
+                ("Category Sync", "sync"),
             )
         ],
     )
     async def audit_permissions(
-        self, ctx: interactions.SlashContext, field: Optional[str] = None
+        self, ctx: interactions.SlashContext, scope: str = "all"
     ) -> None:
         if not (ctx.author.guild_permissions & interactions.Permissions.ADMINISTRATOR):
             await self.send_error(
@@ -717,22 +773,46 @@ class Permissions(interactions.Extension):
             return
 
         await ctx.defer()
-        self.guild = await self.bot.fetch_guild(self.GUILD_ID)
+
+        if not (guild := ctx.guild):
+            await self.send_error(ctx, "Cannot audit permissions: no guild context")
+            return
+
+        self.guild = guild
+        await self.update_role_hierarchy()
 
         risk_functions = {
-            "dangerous": self.check_dangerous_role_combinations,
-            "overwrites": self.analyze_channel_overwrites,
-            "inheritance": self.check_permission_inheritance,
-            "forum": self.check_forum_permissions,
-            "hierarchy": self.validate_role_hierarchy,
-            "categories": self.check_category_inheritance,
+            name: getattr(self, f"check_{name}")
+            for name in (
+                "dangerous_permissions",
+                "channel_overwrites",
+                "permission_inheritance",
+                "forum_settings",
+                "role_hierarchy",
+                "category_inheritance",
+                "special_channels",
+                "channel_optimizations",
+                "category_sync",
+            )
         }
 
-        risks = [
-            risk
-            for func in ([risk_functions[field]] if field else risk_functions.values())
-            for risk in await func()
-        ]
+        if scope != "all" and scope not in risk_functions:
+            await self.send_error(ctx, f"Invalid audit scope: {scope}")
+            return
+
+        try:
+            risks = [
+                risk
+                for func in (
+                    risk_functions.values()
+                    if scope == "all"
+                    else [risk_functions[scope]]
+                )
+                for risk in await func()
+            ]
+        except Exception as e:
+            await self.send_error(ctx, f"Error during audit: {str(e)}")
+            return
 
         risks_by_level = {
             level: [r for r in risks if r.level == level] for level in RiskLevel
@@ -766,29 +846,43 @@ class Permissions(interactions.Extension):
                 )
 
                 for risk in page_risks:
+                    description = risk.description[:256] or "No description"
+                    mitigation = risk.mitigation[:1024] or "No mitigation steps"
+                    affected_perms = (
+                        ", ".join(
+                            permission_value_to_names(sum(risk.affected_permissions))
+                        )[:1024]
+                        if risk.affected_permissions
+                        else "None"
+                    )
+
                     current_embed.add_field(
-                        name=risk.description[:256],
+                        name=description,
                         value=(
-                            f"**Recommended Action:**\n{risk.mitigation[:1024]}\n"
-                            f"**Affected Permissions:**\n"
-                            f"{', '.join(permission_value_to_names(sum(risk.affected_permissions)))[:1024]}"
+                            f"**Recommended Action:**\n{mitigation}\n"
+                            f"**Affected Permissions:**\n{affected_perms}"
                         ),
                         inline=False,
                     )
 
                 embeds.append(current_embed)
 
-        if risks and (fix_results := await self.apply_fixes(ctx, risks)):
-            await self.send_success(
-                ctx, "Automatic fixes applied:\n- " + "\n- ".join(fix_results)
-            )
+        try:
+            if risks and (fix_results := await self.apply_fixes(ctx, risks)):
+                await self.send_success(
+                    ctx, "Automatic fixes applied:\n- " + "\n- ".join(fix_results)
+                )
 
-        if embeds:
-            await Paginator.create_from_embeds(self.bot, *embeds, timeout=300).send(ctx)
-        else:
-            await self.send_success(
-                ctx, "No permission risks found.", log_to_channel=False
-            )
+            if embeds:
+                await Paginator.create_from_embeds(self.bot, *embeds, timeout=300).send(
+                    ctx
+                )
+            else:
+                await self.send_success(
+                    ctx, "No permission risks found.", should_log=False
+                )
+        except Exception as e:
+            await self.send_error(ctx, f"Error sending audit results: {str(e)}")
 
     @module_base.subcommand(
         "export", sub_cmd_description="Export all permission settings"
@@ -863,7 +957,7 @@ class Permissions(interactions.Extension):
         }
 
         await self.send_success(
-            ctx, "Successfully exported all permission settings.", log_to_channel=False
+            ctx, "Successfully exported all permission settings.", should_log=False
         )
         await ctx.send(
             file=interactions.File(
@@ -879,7 +973,7 @@ class Permissions(interactions.Extension):
 
     # Serve
 
-    async def monitor_permission_changes(
+    async def monitor_role_permission_changes(
         self,
         before: Union[interactions.Role, interactions.PermissionOverwrite],
         after: Union[interactions.Role, interactions.PermissionOverwrite],
@@ -895,7 +989,7 @@ class Permissions(interactions.Extension):
             (
                 PermissionRisk(
                     risk.level,
-                    f"\n**Security Alert:** Role `{after.name}` received potentially dangerous permissions\n",
+                    f"\n**Security Alert:** Role `{after.name}` received potentially dangerous permissions",
                     "".join(
                         (
                             f"**Added Permissions:**\n- {', '.join(permission_value_to_names(added_perms))}\n",
@@ -904,7 +998,7 @@ class Permissions(interactions.Extension):
                     ),
                     frozenset((added_perms & perm,)),
                 )
-                for perm, risk in self.dangerous_permission_masks.items()
+                for perm, risk in self.dangerous_permission_combinations.items()
                 if added_perms & perm
             ),
             None,
@@ -951,7 +1045,7 @@ class Permissions(interactions.Extension):
 
         return results
 
-    async def rollback_changes(
+    async def rollback_permission_changes(
         self, ctx: interactions.SlashContext, role: interactions.Role, steps: int = 1
     ) -> None:
         try:
@@ -992,7 +1086,7 @@ class Permissions(interactions.Extension):
         except Exception as e:
             await self.send_error(ctx, f"Failed to rollback changes: {str(e)}")
 
-    async def apply_template(
+    async def apply_permission_template(
         self,
         ctx: interactions.SlashContext,
         role: interactions.Role,
@@ -1041,11 +1135,11 @@ class Permissions(interactions.Extension):
         tuple(
             map(
                 lambda c: asyncio.create_task(c()),
-                (self.check_temp_permissions, self.periodic_audit),
+                (self.cleanup_expired_permissions, self.run_scheduled_permission_audit),
             )
         )
 
-    async def check_temp_permissions(self) -> None:
+    async def cleanup_expired_permissions(self) -> None:
         while True:
             now = datetime.now(timezone.utc)
             expired = [
@@ -1079,13 +1173,13 @@ class Permissions(interactions.Extension):
 
             await asyncio.sleep(60)
 
-    async def periodic_audit(self) -> None:
+    async def run_scheduled_permission_audit(self) -> None:
         while True:
             if self.guild:
                 risks = []
                 for f in (
-                    self.check_dangerous_role_combinations,
-                    self.analyze_channel_overwrites,
+                    self.check_dangerous_permissions,
+                    self.check_channel_overwrites,
                     self.check_permission_inheritance,
                 ):
                     risks.extend(await f())
@@ -1100,7 +1194,7 @@ class Permissions(interactions.Extension):
                         None,
                         f"Automated Permission Audit Found {len(risks)} Issues:\n"
                         + "\n".join(risk_messages),
-                        log_to_channel=True,
+                        should_log=True,
                     )
 
             await asyncio.sleep(86400)
@@ -1111,9 +1205,11 @@ class Permissions(interactions.Extension):
             return
 
         self.guild = event.after.guild
-        if risk := await self.monitor_permission_changes(event.before, event.after):
+        if risk := await self.monitor_role_permission_changes(
+            event.before, event.after
+        ):
             await self.send_error(
                 None,
                 f"Permission change warning `{risk.level.name}`: {risk.description}\n{risk.mitigation}",
-                log_to_channel=True,
+                should_log=True,
             )
