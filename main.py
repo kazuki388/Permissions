@@ -13,7 +13,7 @@ from typing import Any, FrozenSet, List, NamedTuple, Optional, Union
 import interactions
 import orjson
 from interactions.api.events import RoleUpdate
-from interactions.client.errors import NotFound
+from interactions.client.errors import Forbidden, NotFound
 from interactions.ext.paginators import Paginator
 
 BASE_DIR: str = os.path.dirname(os.path.abspath(__file__))
@@ -56,7 +56,7 @@ class PermissionChange(NamedTuple):
 
 
 @lru_cache(maxsize=None)
-def _risk_level_value(level: "RiskLevel") -> int:
+def risk_level_value(level: "RiskLevel") -> int:
     return level.value
 
 
@@ -69,7 +69,7 @@ class RiskLevel(Enum):
     INFO = auto()
 
     def __lt__(self, other: "RiskLevel") -> bool:
-        return _risk_level_value(self) < _risk_level_value(other)
+        return risk_level_value(self) < risk_level_value(other)
 
 
 @dataclass(frozen=True, slots=True)
@@ -98,7 +98,7 @@ class EmbedColor(Enum):
 
     @property
     def rgb(self) -> tuple[int, int, int]:
-        return (self.value >> 16 & 0xFF, self.value >> 8 & 0xFF, self.value & 0xFF)
+        return self.value >> 16 & 0xFF, self.value >> 8 & 0xFF, self.value & 0xFF
 
 
 @dataclass(slots=True)
@@ -118,16 +118,18 @@ class PermissionChangeLog:
             title="Permission Change",
             description=f"Role <@&{self.role_id}> permissions updated",
             fields=[
-                {"name": "Changed By", "value": f"<@{self.changed_by}>"},
-                {"name": "Reason", "value": self.reason},
-                {
-                    "name": "Added Permissions",
-                    "value": "\n".join(permission_value_to_names(added)),
-                },
-                {
-                    "name": "Removed Permissions",
-                    "value": "\n".join(permission_value_to_names(removed)),
-                },
+                interactions.EmbedField(
+                    name="Changed By", value=f"<@{self.changed_by}>"
+                ),
+                interactions.EmbedField(name="Reason", value=self.reason),
+                interactions.EmbedField(
+                    name="Added Permissions",
+                    value="\n".join(permission_value_to_names(added)),
+                ),
+                interactions.EmbedField(
+                    name="Removed Permissions",
+                    value="\n".join(permission_value_to_names(removed)),
+                ),
             ],
             timestamp=self.timestamp,
         )
@@ -174,7 +176,9 @@ class Permissions(interactions.Extension):
     def __init__(self, bot: interactions.Client) -> None:
         self.bot: interactions.Client = bot
         self.role_hierarchy: dict[int, RoleLevel] = {}
-        self.channel_overwrites: dict[int, dict[int, interactions.Overwrite]] = {}
+        self.channel_overwrites: dict[
+            int, dict[int, interactions.PermissionOverwrite]
+        ] = {}
         self.guild: Optional[interactions.Guild] = None
         self.log_channel_id: int = 1166627731916734504
         self.log_forum_id: int = 1159097493875871784
@@ -283,14 +287,14 @@ class Permissions(interactions.Extension):
                     RiskLevel.LOW,
                     f"Forum channel {c.name} allows everyone to create threads",
                     "Consider restricting thread creation to specific roles",
-                    frozenset({interactions.Permissions.CREATE_PUBLIC_THREADS.value}),
+                    frozenset({interactions.Permissions.CREATE_POSTS.value}),
                 )
                 for c in filter(
-                    lambda ch: ch.type == interactions.ChannelType.FORUM,
+                    lambda ch: ch.type == interactions.ChannelType.GUILD_FORUM,
                     self.guild.channels,
                 )
                 if any(
-                    o.allow & interactions.Permissions.CREATE_PUBLIC_THREADS.value
+                    o.allow & interactions.Permissions.CREATE_POSTS.value
                     for o in c.permission_overwrites
                     if o.id == self.guild.id
                 )
@@ -332,7 +336,11 @@ class Permissions(interactions.Extension):
         if not self.guild:
             return []
         roles = sorted(self.guild.roles, key=lambda r: r.position, reverse=True)
-        admin_roles = [r for r in roles if r.permissions.administrator]
+        admin_roles = [
+            r
+            for r in roles
+            if r.permissions.value & interactions.Permissions.ADMINISTRATOR.value
+        ]
         return [
             *(
                 [
@@ -348,7 +356,10 @@ class Permissions(interactions.Extension):
                     r
                     for r in roles
                     if r.position > admin_roles[0].position
-                    and not r.permissions.administrator
+                    and not (
+                        r.permissions.value
+                        & interactions.Permissions.ADMINISTRATOR.value
+                    )
                 )
                 else []
             ),
@@ -398,7 +409,7 @@ class Permissions(interactions.Extension):
                     frozenset({interactions.Permissions.SEND_MESSAGES.value}),
                 )
                 for channel in filter(
-                    lambda c: c.type == interactions.ChannelType.ANNOUNCEMENT,
+                    lambda c: c.type == interactions.ChannelType.GUILD_NEWS,
                     self.guild.channels,
                 )
                 if any(
@@ -499,7 +510,7 @@ class Permissions(interactions.Extension):
         ]
 
     @property
-    @lru_cache(maxsize=128)
+    @lru_cache()
     def dangerous_permission_combinations(self) -> dict[int, PermissionRisk]:
         return {p: r for perms, r in self.DANGEROUS_COMBINATIONS.items() for p in perms}
 
@@ -515,7 +526,7 @@ class Permissions(interactions.Extension):
                     frozenset({interactions.Permissions.SEND_MESSAGES.value}),
                 )
                 for channel in filter(
-                    lambda c: c.type == interactions.ChannelType.ANNOUNCEMENT.value,
+                    lambda c: c.type == interactions.ChannelType.GUILD_NEWS.value,
                     self.guild.channels,
                 )
                 if any(
@@ -531,7 +542,7 @@ class Permissions(interactions.Extension):
                     frozenset({interactions.Permissions.SEND_MESSAGES.value}),
                 )
                 for channel in filter(
-                    lambda c: c.type == interactions.ChannelType.FORUM.value,
+                    lambda c: c.type == interactions.ChannelType.GUILD_FORUM.value,
                     self.guild.channels,
                 )
                 if any(
@@ -569,8 +580,9 @@ class Permissions(interactions.Extension):
 
     # Views
 
+    @staticmethod
     async def create_embed(
-        self, title: str, description: str = "", color: EmbedColor = EmbedColor.INFO
+        title: str, description: str = "", color: EmbedColor = EmbedColor.INFO
     ) -> interactions.Embed:
         return interactions.Embed(
             title=title,
@@ -675,6 +687,238 @@ class Permissions(interactions.Extension):
     )
 
     @module_base.subcommand(
+        "disable", sub_cmd_description="Disable a specific permission for all roles"
+    )
+    @interactions.slash_option(
+        name="type",
+        description="The type of permission to disable",
+        required=True,
+        opt_type=interactions.OptionType.STRING,
+        choices=[
+            interactions.SlashCommandChoice(name=k, value=v)
+            for k, v in {
+                "General": "general",
+                "Text": "text",
+                "Voice": "voice",
+                "Advanced": "advanced",
+            }.items()
+        ],
+        argument_name="permission_type",
+    )
+    @interactions.slash_option(
+        name="general",
+        description="General server permissions",
+        opt_type=interactions.OptionType.STRING,
+        choices=[
+            interactions.SlashCommandChoice(name=k, value=str(v))
+            for k, v in {
+                "Administrator": 8,
+                "View Audit Log": 128,
+                "Manage Server": 32,
+                "Manage Roles": 268435456,
+                "Manage Channels": 16,
+                "Manage Guild": 32,
+                "View Guild Insights": 524288,
+                "Manage Events": 8589934592,
+                "Create Guild Expressions": 8796093022208,
+                "View Creator Analytics": 2199023255552,
+            }.items()
+        ],
+        argument_name="general_perms",
+    )
+    @interactions.slash_option(
+        name="text",
+        description="Text channel permissions",
+        opt_type=interactions.OptionType.STRING,
+        choices=[
+            interactions.SlashCommandChoice(name=k, value=str(v))
+            for k, v in {
+                "View Channel": 1024,
+                "Send Messages": 2048,
+                "Create Posts": 2048,
+                "Send TTS Messages": 4096,
+                "Manage Messages": 8192,
+                "Embed Links": 16384,
+                "Attach Files": 32768,
+                "Read Message History": 65536,
+                "Mention Everyone": 131072,
+                "Use External Emojis": 262144,
+                "Add Reactions": 64,
+                "Use External Stickers": 137438953472,
+                "Create Public Threads": 34359738368,
+                "Create Private Threads": 68719476736,
+                "Send Messages In Threads": 274877906944,
+                "Send Voice Messages": 70368744177664,
+                "Send Polls": 562949953421312,
+            }.items()
+        ],
+        argument_name="text_perms",
+    )
+    @interactions.slash_option(
+        name="voice",
+        description="Voice channel permissions",
+        opt_type=interactions.OptionType.STRING,
+        choices=[
+            interactions.SlashCommandChoice(name=k, value=str(v))
+            for k, v in {
+                "Connect": 1048576,
+                "Speak": 2097152,
+                "Stream": 512,
+                "Use VAD": 33554432,
+                "Priority Speaker": 256,
+                "Mute Members": 4194304,
+                "Deafen Members": 8388608,
+                "Move Members": 16777216,
+                "Request To Speak": 4294967296,
+                "Start Activities": 549755813888,
+                "Use Soundboard": 4398046511104,
+                "Use External Sounds": 35184372088832,
+            }.items()
+        ],
+        argument_name="voice_perms",
+    )
+    @interactions.slash_option(
+        name="perms",
+        description="Advanced permissions",
+        opt_type=interactions.OptionType.STRING,
+        choices=[
+            interactions.SlashCommandChoice(name=k, value=str(v))
+            for k, v in {
+                "Create Instant Invite": 1,
+                "Kick Members": 2,
+                "Ban Members": 4,
+                "Change Nickname": 67108864,
+                "Manage Nicknames": 134217728,
+                "Manage Webhooks": 536870912,
+                "Manage Emojis And Stickers": 1073741824,
+                "Use Application Commands": 2147483648,
+                "Manage Threads": 17179869184,
+                "Moderate Members": 1099511627776,
+            }.items()
+        ],
+        argument_name="advanced_perms",
+    )
+    @interactions.slash_option(
+        name="ignore",
+        description="Whether to ignore roles with administrator permission",
+        opt_type=interactions.OptionType.BOOLEAN,
+        argument_name="ignore_admin",
+    )
+    @interactions.slash_default_member_permission(
+        interactions.Permissions.ADMINISTRATOR
+    )
+    @interactions.max_concurrency(interactions.Buckets.GUILD, 1)
+    async def disable_permission(
+        self,
+        ctx: interactions.SlashContext,
+        permission_type: str,
+        general_perms: Optional[str] = None,
+        text_perms: Optional[str] = None,
+        voice_perms: Optional[str] = None,
+        advanced_perms: Optional[str] = None,
+        ignore_admin: bool = True,
+    ) -> None:
+        if not (
+            ctx.guild
+            and ctx.author.guild_permissions & interactions.Permissions.ADMINISTRATOR
+        ):
+            await self.send_error(
+                ctx,
+                f"Cannot disable permissions: {'no guild context' if not ctx.guild else 'You need Administrator permission'}",
+            )
+            return
+
+        permission = None
+        if permission_type == "general" and general_perms:
+            permission = general_perms
+        elif permission_type == "text" and text_perms:
+            permission = text_perms
+        elif permission_type == "voice" and voice_perms:
+            permission = voice_perms
+        elif permission_type == "advanced" and advanced_perms:
+            permission = advanced_perms
+
+        if not permission:
+            await self.send_error(
+                ctx,
+                f"No permission selected for type: {permission_type}",
+            )
+            return
+
+        try:
+            permission_value = int(permission)
+            affected_roles: list[str] = []
+            skipped_roles: list[str] = []
+            failed_roles: list[str] = []
+
+            roles = (
+                role
+                for role in ctx.guild.roles
+                if not (
+                    ignore_admin
+                    and role.permissions & interactions.Permissions.ADMINISTRATOR
+                )
+            )
+
+            for role in roles:
+                if not role.permissions.value & permission_value:
+                    continue
+
+                try:
+                    new_permissions = role.permissions.value & ~permission_value
+                    await role.edit(permissions=new_permissions)
+                    affected_roles.append(role.name)
+
+                    self.permission_history[role.id].append(
+                        PermissionChange(
+                            role_id=role.id,
+                            old_permissions=role.permissions.value,
+                            new_permissions=new_permissions,
+                            changed_by=ctx.author.id,
+                            timestamp=datetime.now(timezone.utc),
+                            reason=f"Bulk permission disable: {permission_value_to_names(permission_value)}",
+                        )
+                    )
+                except Forbidden:
+                    failed_roles.append(role.name)
+                    logger.warning(f"Missing permissions to modify role: {role.name}")
+                    continue
+                except Exception as e:
+                    logger.error(f"Failed to update role {role.name}: {e}")
+                    failed_roles.append(role.name)
+                    continue
+
+            response_parts = [
+                (
+                    f"Disabled permission for roles: {', '.join(affected_roles)}"
+                    if affected_roles
+                    else None
+                ),
+                (
+                    f"Skipped administrator roles: {', '.join(skipped_roles)}"
+                    if skipped_roles and ignore_admin
+                    else None
+                ),
+                (
+                    f"Failed to modify roles (insufficient permissions): {', '.join(failed_roles)}"
+                    if failed_roles
+                    else None
+                ),
+                (
+                    "No roles were affected"
+                    if not (affected_roles or skipped_roles or failed_roles)
+                    else None
+                ),
+            ]
+
+            await self.send_success(ctx, "\n".join(filter(None, response_parts)))
+
+        except ValueError:
+            await self.send_error(ctx, f"Invalid permission value: {permission}")
+        except Exception as e:
+            await self.send_error(ctx, f"An error occurred: {str(e)}")
+
+    @module_base.subcommand(
         "template", sub_cmd_description="Apply a permission template"
     )
     @interactions.slash_option(
@@ -696,7 +940,6 @@ class Permissions(interactions.Extension):
     @interactions.slash_option(
         name="duration",
         description="Duration in minutes (temporary)",
-        required=False,
         opt_type=interactions.OptionType.INTEGER,
         min_value=1,
         max_value=1440,
@@ -765,7 +1008,10 @@ class Permissions(interactions.Extension):
     async def audit_permissions(
         self, ctx: interactions.SlashContext, scope: str = "all"
     ) -> None:
-        if not (ctx.author.guild_permissions & interactions.Permissions.ADMINISTRATOR):
+        if not (
+            ctx.author.guild_permissions.value
+            & interactions.Permissions.ADMINISTRATOR.value
+        ):
             await self.send_error(
                 ctx,
                 "Administrator permissions are required to perform a permissions audit.",
@@ -862,7 +1108,6 @@ class Permissions(interactions.Extension):
                             f"**Recommended Action:**\n{mitigation}\n"
                             f"**Affected Permissions:**\n{affected_perms}"
                         ),
-                        inline=False,
                     )
 
                 embeds.append(current_embed)
@@ -888,7 +1133,10 @@ class Permissions(interactions.Extension):
         "export", sub_cmd_description="Export all permission settings"
     )
     async def export_permissions(self, ctx: interactions.SlashContext) -> None:
-        if not ctx.author.guild_permissions & interactions.Permissions.ADMINISTRATOR:
+        if (
+            not ctx.author.guild_permissions.value
+            & interactions.Permissions.ADMINISTRATOR.value
+        ):
             await self.send_error(
                 ctx, "Administrator permissions are required to export permissions."
             )
