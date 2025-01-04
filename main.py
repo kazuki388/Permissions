@@ -1239,66 +1239,76 @@ class Permissions(interactions.Extension):
             )
         else:
             embeds = []
+            roles_data = export_data["roles"]
 
-            roles_embed = await self.create_embed(
-                title=f"Role Permissions in {guild.name}",
-                description=f"Total Roles: **{len(export_data['roles'])}**",
-            )
+            for chunk_index in range(0, len(roles_data), 25):
+                roles_chunk = roles_data[chunk_index : chunk_index + 25]
 
-            for role_data in export_data["roles"]:
-                perms = role_data["permissions"]["allowed"]
-                perm_str = ", ".join(perms)
-
-                if len(perm_str) > 1024:
-                    chunks = [
-                        "- "
-                        + "\n- ".join(
-                            perms[i : i + max(1, 1024 // (max(map(len, perms)) + 2))]
-                        )
-                        for i in range(
-                            0,
-                            len(perms),
-                            max(1, 1024 // (max(map(len, perms)) + 2)),
-                        )
-                    ]
-
-                    roles_embed.add_field(
-                        name=f"{role_data['name']} (ID: {role_data['id']})",
-                        value=f"Position: **{role_data['position']}**\nPermissions (Part 1):\n{chunks[0]}",
-                    )
-
-                    for i, chunk in enumerate(chunks[1:], 2):
-                        roles_embed.add_field(
-                            name=f"{role_data['name']} (Permissions Part {i})",
-                            value=chunk,
-                        )
-                else:
-                    roles_embed.add_field(
-                        name=f"{role_data['name']} (ID: {role_data['id']})",
-                        value=(
-                            f"Position: **{role_data['position']}**\n"
-                            "Permissions:\n- " + perm_str.replace(", ", "\n- ")
-                        ),
-                    )
-            embeds.append(roles_embed)
-
-            channels_embed = await self.create_embed(
-                title=f"Channel Permissions in {guild.name}",
-                description=f"Total Channels: **{len(export_data['channels'])}**",
-            )
-
-            channels_embed.add_fields(
-                *(
-                    {
-                        "name": f"#{c['name']} (ID: {c['id']})",
-                        "value": f"- Type: **{c['type'].replace('ChannelType.', '')}**\n"
-                        f"- Position: **{c['position']}**\n"
-                        f"- Permission Overwrites: **{len(c.get('permission_overwrites', []))}**",
-                    }
-                    for c in export_data["channels"]
+                roles_embed = await self.create_embed(
+                    title=f"Role Permissions in {guild.name} ({chunk_index//25 + 1}/{-(-len(roles_data)//25)})",
+                    description=f"Total Roles: **{len(export_data['roles'])}**",
                 )
-            )
-            embeds.append(channels_embed)
+
+                for role_data in roles_chunk:
+                    perms = role_data["permissions"]["allowed"]
+                    perm_str = ", ".join(perms)
+
+                    if len(perm_str) > 1024:
+                        chunks = [
+                            "- "
+                            + "\n- ".join(
+                                perms[
+                                    i : i + max(1, 1024 // (max(map(len, perms)) + 2))
+                                ]
+                            )
+                            for i in range(
+                                0,
+                                len(perms),
+                                max(1, 1024 // (max(map(len, perms)) + 2)),
+                            )
+                        ]
+
+                        roles_embed.add_field(
+                            name=f"{role_data['name']} (ID: {role_data['id']})",
+                            value=f"Position: **{role_data['position']}**\nPermissions (Part 1):\n{chunks[0]}",
+                        )
+
+                        for i, chunk in enumerate(chunks[1:], 2):
+                            roles_embed.add_field(
+                                name=f"{role_data['name']} (Permissions Part {i})",
+                                value=chunk,
+                            )
+                    else:
+                        roles_embed.add_field(
+                            name=f"{role_data['name']} (ID: {role_data['id']})",
+                            value=(
+                                f"Position: **{role_data['position']}**\n"
+                                "Permissions:\n- " + perm_str.replace(", ", "\n- ")
+                            ),
+                        )
+                embeds.append(roles_embed)
+
+            channels_data = export_data["channels"]
+            for chunk_index in range(0, len(channels_data), 25):
+                channels_chunk = channels_data[chunk_index : chunk_index + 25]
+
+                channels_embed = await self.create_embed(
+                    title=f"Channel Permissions in {guild.name} ({chunk_index//25 + 1}/{-(-len(channels_data)//25)})",
+                    description=f"Total Channels: **{len(export_data['channels'])}**",
+                )
+
+                channels_embed.add_fields(
+                    *(
+                        {
+                            "name": f"#{c['name']} (ID: {c['id']})",
+                            "value": f"- Type: **{c['type'].replace('ChannelType.', '')}**\n"
+                            f"- Position: **{c['position']}**\n"
+                            f"- Permission Overwrites: **{len(c.get('permission_overwrites', []))}**",
+                        }
+                        for c in channels_chunk
+                    )
+                )
+                embeds.append(channels_embed)
 
             paginator = Paginator(
                 client=self.bot,
