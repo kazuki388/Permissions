@@ -1119,9 +1119,18 @@ class Permissions(interactions.Extension):
                 )
 
             if embeds:
-                await Paginator.create_from_embeds(self.bot, *embeds, timeout=300).send(
-                    ctx
+                paginator = Paginator(
+                    client=self.bot,
+                    pages=embeds,
+                    timeout_interval=120,
+                    show_callback_button=True,
+                    show_select_menu=True,
+                    show_back_button=True,
+                    show_next_button=True,
+                    show_first_button=True,
+                    show_last_button=True,
                 )
+                await paginator.send(ctx)
             else:
                 await self.send_success(
                     ctx, "No permission risks found.", should_log=False
@@ -1132,7 +1141,19 @@ class Permissions(interactions.Extension):
     @module_base.subcommand(
         "export", sub_cmd_description="Export all permission settings"
     )
-    async def export_permissions(self, ctx: interactions.SlashContext) -> None:
+    @interactions.slash_option(
+        name="format",
+        description="Output format",
+        required=True,
+        opt_type=interactions.OptionType.STRING,
+        choices=[
+            interactions.SlashCommandChoice(name="JSON", value="json"),
+            interactions.SlashCommandChoice(name="Pages", value="pages"),
+        ],
+    )
+    async def export_permissions(
+        self, ctx: interactions.SlashContext, format: str = "json"
+    ) -> None:
         if (
             not ctx.author.guild_permissions.value
             & interactions.Permissions.ADMINISTRATOR.value
@@ -1204,20 +1225,96 @@ class Permissions(interactions.Extension):
             ],
         }
 
-        await self.send_success(
-            ctx, "Successfully exported all permission settings.", should_log=False
-        )
-        await ctx.send(
-            file=interactions.File(
-                StringIO(
-                    orjson.dumps(
-                        export_data,
-                        option=orjson.OPT_INDENT_2 | orjson.OPT_NON_STR_KEYS,
-                    ).decode()
+        if format == "json":
+            await ctx.send(
+                file=interactions.File(
+                    StringIO(
+                        orjson.dumps(
+                            export_data,
+                            option=orjson.OPT_INDENT_2 | orjson.OPT_NON_STR_KEYS,
+                        ).decode()
+                    ),
+                    file_name=f"{guild.name}_permissions_{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}.json",
                 ),
-                file_name=f"{guild.name}_permissions_{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}.json",
-            ),
-        )
+            )
+        else:
+            embeds = []
+
+            roles_embed = await self.create_embed(
+                title=f"Role Permissions in {guild.name}",
+                description=f"Total Roles: **{len(export_data['roles'])}**",
+            )
+
+            for role_data in export_data["roles"]:
+                perms = role_data["permissions"]["allowed"]
+                perm_str = ", ".join(perms)
+
+                if len(perm_str) > 1024:
+                    chunks = [
+                        "- "
+                        + "\n- ".join(
+                            perms[i : i + max(1, 1024 // (max(map(len, perms)) + 2))]
+                        )
+                        for i in range(
+                            0,
+                            len(perms),
+                            max(1, 1024 // (max(map(len, perms)) + 2)),
+                        )
+                    ]
+
+                    roles_embed.add_field(
+                        name=f"{role_data['name']} (ID: {role_data['id']})",
+                        value=f"Position: **{role_data['position']}**\nPermissions (Part 1):\n{chunks[0]}",
+                    )
+
+                    for i, chunk in enumerate(chunks[1:], 2):
+                        roles_embed.add_field(
+                            name=f"{role_data['name']} (Permissions Part {i})",
+                            value=chunk,
+                        )
+                else:
+                    roles_embed.add_field(
+                        name=f"{role_data['name']} (ID: {role_data['id']})",
+                        value=(
+                            f"Position: **{role_data['position']}**\n"
+                            "Permissions:\n- " + perm_str.replace(", ", "\n- ")
+                        ),
+                    )
+            embeds.append(roles_embed)
+
+            channels_embed = await self.create_embed(
+                title=f"Channel Permissions in {guild.name}",
+                description=f"Total Channels: **{len(export_data['channels'])}**",
+            )
+
+            channels_embed.add_fields(
+                *(
+                    {
+                        "name": f"#{c['name']} (ID: {c['id']})",
+                        "value": f"- Type: **{c['type'].replace('ChannelType.', '')}**\n"
+                        f"- Position: **{c['position']}**\n"
+                        f"- Permission Overwrites: **{len(c.get('permission_overwrites', []))}**",
+                    }
+                    for c in export_data["channels"]
+                )
+            )
+            embeds.append(channels_embed)
+
+            paginator = Paginator(
+                client=self.bot,
+                pages=embeds,
+                timeout_interval=120,
+                show_callback_button=True,
+                show_select_menu=True,
+                show_back_button=True,
+                show_next_button=True,
+                show_first_button=True,
+                show_last_button=True,
+                wrong_user_message="This leaderboard can only be controlled by the user who requested it.",
+                hide_buttons_on_stop=True,
+            )
+
+            await paginator.send(ctx)
 
     # Serve
 
